@@ -34,17 +34,7 @@ public class HideStatusBarModule extends XposedModule {
         log(Log.INFO, TAG, "Hooking Opera Beta, pid=" + android.os.Process.myPid());
         ClassLoader cl = param.getDefaultClassLoader();
 
-        // 获取状态栏高度
-        try {
-            int resId = param.getApplicationInfo().targetContext.getResources()
-                .getIdentifier("status_bar_height", "dimen", "android");
-            if (resId > 0) {
-                statusBarHeight = param.getApplicationInfo().targetContext.getResources()
-                    .getDimensionPixelSize(resId);
-            }
-        } catch (Exception e) {
-            statusBarHeight = 141; // fallback from logs
-        }
+        statusBarHeight = 141;
         log(Log.INFO, TAG, "statusBarHeight=" + statusBarHeight);
 
         try {

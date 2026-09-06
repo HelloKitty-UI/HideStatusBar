@@ -5,8 +5,8 @@ import android.os.Build;
 import android.util.Log;
 import android.view.View;
 import android.view.Window;
+import android.view.WindowInsets;
 import android.view.WindowInsetsController;
-import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
 
 public class HideStatusBarModule extends XposedModule {
@@ -54,7 +54,7 @@ public class HideStatusBarModule extends XposedModule {
             java.lang.reflect.Method onFocusChanged = activityClass.getMethod(
                 "onWindowFocusChanged", boolean.class);
             hook(onFocusChanged).intercept(chain -> {
-                boolean hasFocus = (boolean) chain.getArgs()[0];
+                boolean hasFocus = (boolean) chain.getArg(0);
                 Object result = chain.proceed();
                 if (hasFocus && chain.getThisObject() instanceof Activity) {
                     hideStatusBar((Activity) chain.getThisObject());
@@ -80,7 +80,7 @@ public class HideStatusBarModule extends XposedModule {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 WindowInsetsController ctrl = window.getInsetsController();
                 if (ctrl != null) {
-                    ctrl.hide(WindowInsetsController.Type.statusBars());
+                    ctrl.hide(WindowInsets.Type.statusBars());
                     ctrl.setSystemBarsBehavior(
                         WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
                 }

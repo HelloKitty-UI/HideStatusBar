@@ -2,19 +2,20 @@ package com.hidestatusbar.xposed;
 
 import android.app.Activity;
 import android.os.Build;
+import android.util.Log;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsetsController;
+import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
-import io.github.libxposed.api.callbacks.MethodHookCallback;
-import io.github.libxposed.api.types.MethodHooker;
-import java.lang.reflect.Method;
 
 public class HideStatusBarModule extends XposedModule {
 
+    private static final String TAG = "HideStatusBar";
+
     @Override
     public void onModuleLoaded() {
-        log("HideStatusBar: Module loaded successfully");
+        log(Log.INFO, TAG, "Module loaded successfully");
     }
 
     @Override
@@ -24,7 +25,7 @@ public class HideStatusBarModule extends XposedModule {
             return;
         }
 
-        log("HideStatusBar: Detected Opera Beta, hooking BrowserActivity");
+        log(Log.INFO, TAG, "Detected Opera Beta, hooking BrowserActivity");
 
         ClassLoader classLoader = param.getDefaultClassLoader();
 
@@ -33,44 +34,37 @@ public class HideStatusBarModule extends XposedModule {
                 "com.opera.android.BrowserActivity", false, classLoader);
 
             // Hook onResume
-            Method onResume = activityClass.getMethod("onResume");
-            hookMethod(onResume, new MethodHookCallback() {
-                @Override
-                public void before(MethodHookParam param) {
-                    Object obj = param.getThisObject();
-                    if (obj instanceof Activity) {
-                        hideStatusBar((Activity) obj);
-                    }
+            java.lang.reflect.Method onResume = activityClass.getMethod("onResume");
+            hook(onResume).intercept(chain -> {
+                Object obj = chain.getThisObject();
+                if (obj instanceof Activity) {
+                    hideStatusBar((Activity) obj);
                 }
-
-                @Override
-                public void after(MethodHookParam param) {
-                    Object obj = param.getThisObject();
-                    if (obj instanceof Activity) {
-                        Activity activity = (Activity) obj;
-                        hideStatusBar(activity);
-                        activity.getWindow().getDecorView().postDelayed(
-                            () -> hideStatusBar(activity), 300);
-                    }
+                Object result = chain.proceed();
+                if (obj instanceof Activity) {
+                    Activity activity = (Activity) obj;
+                    hideStatusBar(activity);
+                    activity.getWindow().getDecorView().postDelayed(
+                        () -> hideStatusBar(activity), 300);
                 }
+                return result;
             });
 
             // Hook onWindowFocusChanged
-            Method onFocusChanged = activityClass.getMethod(
+            java.lang.reflect.Method onFocusChanged = activityClass.getMethod(
                 "onWindowFocusChanged", boolean.class);
-            hookMethod(onFocusChanged, new MethodHookCallback() {
-                @Override
-                public void after(MethodHookParam param) {
-                    boolean hasFocus = (boolean) param.args[0];
-                    if (hasFocus && param.getThisObject() instanceof Activity) {
-                        hideStatusBar((Activity) param.getThisObject());
-                    }
+            hook(onFocusChanged).intercept(chain -> {
+                boolean hasFocus = (boolean) chain.getArgs()[0];
+                Object result = chain.proceed();
+                if (hasFocus && chain.getThisObject() instanceof Activity) {
+                    hideStatusBar((Activity) chain.getThisObject());
                 }
+                return result;
             });
 
-            log("HideStatusBar: All hooks installed successfully");
+            log(Log.INFO, TAG, "All hooks installed successfully");
         } catch (Exception e) {
-            log("HideStatusBar: Failed to install hooks: " + e.getMessage());
+            log(Log.ERROR, TAG, "Failed to install hooks: " + e.getMessage());
         }
     }
 
@@ -99,7 +93,7 @@ public class HideStatusBarModule extends XposedModule {
                 decorView.setSystemUiVisibility(flags);
             }
         } catch (Exception e) {
-            log("HideStatusBar: Error hiding status bar: " + e.getMessage());
+            log(Log.ERROR, TAG, "Error hiding status bar: " + e.getMessage());
         }
     }
 }

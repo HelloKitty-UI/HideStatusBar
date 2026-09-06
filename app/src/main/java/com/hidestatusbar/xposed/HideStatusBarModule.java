@@ -80,6 +80,8 @@ public class HideStatusBarModule extends XposedModule {
         }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                // 让内容延伸到系统栏后面
+                window.setDecorFitsSystemWindows(false);
                 WindowInsetsController ctrl = window.getInsetsController();
                 if (ctrl != null) {
                     ctrl.hide(WindowInsets.Type.statusBars());
@@ -89,9 +91,15 @@ public class HideStatusBarModule extends XposedModule {
             } else {
                 View decorView = window.getDecorView();
                 int flags = decorView.getSystemUiVisibility();
+                // 先设置布局标志，让内容延伸到状态栏后面
+                flags |= View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+                decorView.setSystemUiVisibility(flags);
+                // 再设置隐藏标志
                 flags |= View.SYSTEM_UI_FLAG_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN;
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
                 decorView.setSystemUiVisibility(flags);
             }
         } catch (Exception e) {

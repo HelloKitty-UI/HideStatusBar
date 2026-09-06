@@ -7,6 +7,7 @@ import android.util.Log;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import io.github.libxposed.api.XposedModule;
 
@@ -34,73 +35,35 @@ public class HideStatusBarModule extends XposedModule {
             Class<?> statusBarLayout = Class.forName(
                 "com.opera.android.StatusBarDrawingFrameLayout", false, cl);
 
-            // Hook constructors - force all color/draw fields after Opera initializes them
-            for (java.lang.reflect.Constructor<?> ctor : statusBarLayout.getDeclaredConstructors()) {
-                Class<?>[] params = ctor.getParameterTypes();
-                if (params.length == 3
-                        && params[0].getName().equals("android.content.Context")) {
-                    hook(ctor).intercept(chain -> {
-                        chain.proceed();
-                        forceTransparent(statusBarLayout, chain.getThisObject());
-                        return null;
-                    });
-                    log(Log.INFO, TAG, "Hooked constructor (" + params.length + " args)");
-                    break;
-                }
-            }
-
-            // Hook onApplyWindowInsets - prevent setPadding
+            // Hook onApplyWindowInsets - prevent setPadding(0, statusBarHeight, 0, bottom)
             hook(statusBarLayout.getMethod("onApplyWindowInsets", WindowInsets.class))
                 .intercept(chain -> {
                     return chain.getArg(0);
                 });
             log(Log.INFO, TAG, "Hooked onApplyWindowInsets");
 
-            // Hook e(I) - runtime setter for status bar color k
-            // Block ALL calls to prevent Opera from setting k back to non-transparent
-            try {
-                java.lang.reflect.Method eMethod = statusBarLayout.getDeclaredMethod("e", int.class);
-                hook(eMethod).intercept(chain -> {
-                    log(Log.INFO, TAG, "Blocked e() call, was=" + chain.getArg(0));
-                    return null;
-                });
-                log(Log.INFO, TAG, "Hooked e(I)");
-            } catch (Exception e) {
-                log(Log.WARN, TAG, "e(I) hook failed: " + e.getMessage());
-            }
-
-            // Hook onDraw - skip drawRect but let super run
-            // This is the backup: even if fields get reset, onDraw won't draw the rectangle
+            // Hook onDraw - completely skip (no super call to avoid recursion)
             hook(statusBarLayout.getMethod("onDraw", android.graphics.Canvas.class))
-                .intercept(chain -> {
-                    // Call super.onDraw() only (View's version, does nothing harmful)
-                    try {
-                        java.lang.reflect.Method superOnDraw =
-                            View.class.getDeclaredMethod("onDraw", android.graphics.Canvas.class);
-                        superOnDraw.invoke(chain.getThisObject(), chain.getArg(0));
-                    } catch (Exception ignored) {}
-                    return null;
-                });
-            log(Log.INFO, TAG, "Hooked onDraw");
+                .intercept(chain -> null);
+            log(Log.INFO, TAG, "Hooked onDraw (blocked)");
 
-            // Hook draw - skip the overlay rect at bottom
+            // Hook draw - completely skip (no super call to avoid recursion)
             hook(statusBarLayout.getMethod("draw", android.graphics.Canvas.class))
-                .intercept(chain -> {
-                    // Call super.draw() only (View's version)
-                    try {
-                        java.lang.reflect.Method superDraw =
-                            View.class.getDeclaredMethod("draw", android.graphics.Canvas.class);
-                        superDraw.invoke(chain.getThisObject(), chain.getArg(0));
-                    } catch (Exception ignored) {}
-                    return null;
-                });
-            log(Log.INFO, TAG, "Hooked draw");
+                .intercept(chain -> null);
+            log(Log.INFO, TAG, "Hooked draw (blocked)");
 
-            log(Log.INFO, TAG, "All StatusBarDrawingFrameLayout hooks installed");
+            // Hide the StatusBarDrawingFrameLayout view completely
+            // Do this every time the view is laid out
+            try {
+                java.lang.reflect.Method addOnLayoutChangeListener =
+                    View.class.getMethod("addOnLayoutChangeListener", View.OnLayoutChangeListener.class);
+                // Can't use lambda directly, use a post approach instead
+            } catch (Exception ignored) {}
 
             Class<?> browserActivity = Class.forName(
                 "com.opera.android.BrowserActivity", false, cl);
 
+            // Hook onCreate - set full screen + hide status bar
             hook(browserActivity.getMethod("onCreate", android.os.Bundle.class))
                 .intercept(chain -> {
                     Object result = chain.proceed();
@@ -110,24 +73,35 @@ public class HideStatusBarModule extends XposedModule {
                     return result;
                 });
 
+            // Hook onResume - repeatedly force full screen and hide status bar view
             hook(browserActivity.getMethod("onResume")).intercept(chain -> {
                 Object result = chain.proceed();
                 if (chain.getThisObject() instanceof Activity) {
                     Activity a = (Activity) chain.getThisObject();
                     applyFullScreen(a);
+
+                    // Repeatedly hide the status bar view with delays
+                    // Opera may recreate/show it at various times
                     View decor = a.getWindow().getDecorView();
-                    decor.postDelayed(() -> applyFullScreen(a), 300);
-                    decor.postDelayed(() -> applyFullScreen(a), 800);
+                    for (int delay : new int[]{0, 200, 500, 1000, 2000}) {
+                        decor.postDelayed(() -> {
+                            applyFullScreen(a);
+                            hideStatusBarView(a);
+                        }, delay);
+                    }
                 }
                 return result;
             });
 
+            // Hook onWindowFocusChanged - re-apply when window gets focus
             hook(browserActivity.getMethod("onWindowFocusChanged", boolean.class))
                 .intercept(chain -> {
                     Object result = chain.proceed();
                     if ((boolean) chain.getArg(0)
                             && chain.getThisObject() instanceof Activity) {
-                        applyFullScreen((Activity) chain.getThisObject());
+                        Activity a = (Activity) chain.getThisObject();
+                        applyFullScreen(a);
+                        hideStatusBarView(a);
                     }
                     return result;
                 });
@@ -138,34 +112,30 @@ public class HideStatusBarModule extends XposedModule {
         }
     }
 
-    private void forceTransparent(Class<?> clazz, Object obj) {
+    private void hideStatusBarView(Activity activity) {
         try {
-            // f = false (don't draw status bar background)
-            java.lang.reflect.Field fField = clazz.getDeclaredField("f");
-            fField.setAccessible(true);
-            fField.setBoolean(obj, false);
-            log(Log.INFO, TAG, "Set f=false (no status bar draw)");
-
-            // k = TRANSPARENT
-            java.lang.reflect.Field kField = clazz.getDeclaredField("k");
-            kField.setAccessible(true);
-            kField.setInt(obj, Color.TRANSPARENT);
-            log(Log.INFO, TAG, "Set k=TRANSPARENT");
-
-            // l = TRANSPARENT
-            java.lang.reflect.Field lField = clazz.getDeclaredField("l");
-            lField.setAccessible(true);
-            lField.setInt(obj, Color.TRANSPARENT);
-            log(Log.INFO, TAG, "Set l=TRANSPARENT");
-
-            // i = 0 (status bar height = 0)
-            java.lang.reflect.Field iField = clazz.getDeclaredField("i");
-            iField.setAccessible(true);
-            iField.setInt(obj, 0);
-            log(Log.INFO, TAG, "Set i=0 (status bar height)");
-
+            View decor = activity.getWindow().getDecorView();
+            // Find and hide the StatusBarDrawingFrameLayout recursively
+            hideViewRecursive(decor);
         } catch (Exception e) {
-            log(Log.WARN, TAG, "forceTransparent failed: " + e.getMessage());
+            log(Log.WARN, TAG, "hideStatusBarView error: " + e.getMessage());
+        }
+    }
+
+    private void hideViewRecursive(View view) {
+        if (view == null) return;
+        String name = view.getClass().getName();
+        if (name.contains("StatusBarDrawingFrameLayout")) {
+            view.setVisibility(View.GONE);
+            view.setPadding(0, 0, 0, 0);
+            log(Log.INFO, TAG, "Hid StatusBarDrawingFrameLayout");
+            return;
+        }
+        if (view instanceof android.view.ViewGroup) {
+            android.view.ViewGroup vg = (android.view.ViewGroup) view;
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                hideViewRecursive(vg.getChildAt(i));
+            }
         }
     }
 
@@ -175,12 +145,22 @@ public class HideStatusBarModule extends XposedModule {
         if (window == null) return;
 
         try {
+            // Make status bar transparent
             window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
             window.setStatusBarColor(Color.TRANSPARENT);
             window.setNavigationBarColor(Color.TRANSPARENT);
 
+            // Let content draw behind system bars
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 window.setDecorFitsSystemWindows(false);
+            }
+
+            // Hide status bar via system UI
+            WindowInsetsController ctrl = window.getInsetsController();
+            if (ctrl != null) {
+                ctrl.hide(WindowInsets.Type.statusBars());
+                ctrl.setSystemBarsBehavior(
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
             }
         } catch (Exception e) {
             log(Log.ERROR, TAG, "Error: " + e.getMessage());

@@ -40,47 +40,21 @@ public class HideStatusBarModule extends XposedModule {
                 hook(statusBarLayout.getMethod("onApplyWindowInsets", WindowInsets.class))
                     .intercept(chain -> {
                         log(Log.INFO, TAG, "BLOCKED onApplyWindowInsets on StatusBarDrawingFrameLayout");
-                        return chain.getArg(0);
+                        // 不执行原方法（跳过 setPadding(0, 141, 0, bottom)）
+                        // 但我们仍然需要调用 super.onApplyWindowInsets
+                        // 通过反射调用父类的 onApplyWindowInsets
+                        try {
+                            java.lang.reflect.Method superMethod = View.class.getMethod(
+                                "onApplyWindowInsets", WindowInsets.class);
+                            return superMethod.invoke(chain.getThisObject(), chain.getArg(0));
+                        } catch (Exception e) {
+                            return chain.getArg(0);
+                        }
                     });
                 log(Log.INFO, TAG, "Hooked StatusBarDrawingFrameLayout.onApplyWindowInsets");
             } catch (Exception e) {
                 log(Log.WARN, TAG, "StatusBarDrawingFrameLayout hook failed: " + e.getMessage());
             }
-
-            // Hook View.setPadding - 拦截所有设置 141px top padding 的调用
-            hook(View.class.getMethod("setPadding", int.class, int.class, int.class, int.class))
-                .intercept(chain -> {
-                    int top = (int) chain.getArg(1);
-                    if (top >= 140 && top <= 142) {
-                        String name = "unknown";
-                        int viewId = -1;
-                        if (chain.getThisObject() instanceof View) {
-                            View v = (View) chain.getThisObject();
-                            name = v.getClass().getSimpleName();
-                            viewId = v.getId();
-                        }
-                        // 获取调用栈
-                        StackTraceElement[] stack = Thread.currentThread().getStackTrace();
-                        String caller = "unknown";
-                        for (StackTraceElement s : stack) {
-                            if (!s.getClassName().contains("HideStatusBar")
-                                    && !s.getClassName().contains("Xposed")
-                                    && !s.getClassName().contains("java.lang")) {
-                                caller = s.getClassName() + "." + s.getMethodName()
-                                    + ":" + s.getLineNumber();
-                                break;
-                            }
-                        }
-                        log(Log.INFO, TAG, "BLOCKED setPadding top=" + top
-                            + " view=" + name + " id=" + viewId + " caller=" + caller);
-                        // 直接设 top=0，不调用原方法
-                        ((View) chain.getThisObject()).setPadding(
-                            (int) chain.getArg(0), 0,
-                            (int) chain.getArg(2), (int) chain.getArg(3));
-                        return null;
-                    }
-                    return chain.proceed();
-                });
 
             Class<?> browserActivity = Class.forName(
                 "com.opera.android.BrowserActivity", false, cl);
@@ -102,11 +76,13 @@ public class HideStatusBarModule extends XposedModule {
                     Activity a = (Activity) chain.getThisObject();
                     applyFullScreen(a);
                     View decor = a.getWindow().getDecorView();
+                    // 多次延迟重试，确保覆盖 Opera 的初始化
                     decor.postDelayed(() -> applyFullScreen(a), 200);
-                    decor.postDelayed(() -> applyFullScreen(a), 600);
+                    decor.postDelayed(() -> applyFullScreen(a), 500);
+                    decor.postDelayed(() -> applyFullScreen(a), 1000);
                     decor.postDelayed(() -> {
-                        // 延迟后强制遍历视图树，清除所有 padding
-                        clearAllPadding(a.getWindow().getDecorView());
+                        // 最终强制清除所有 padding
+                        clearAllPadding(decor);
                     }, 300);
                 }
                 return result;
@@ -158,39 +134,41 @@ public class HideStatusBarModule extends XposedModule {
                     | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
             }
 
-            // 强制禁用 DecorView 的 fitsSystemWindows
+            // 强制禁用 DecorView 及所有子 View 的 fitsSystemWindows
             View decorView = window.getDecorView();
             decorView.setFitsSystemWindows(false);
 
             // 清除 DecorView padding
-            if (decorView.getPaddingTop() > 0) {
-                log(Log.INFO, TAG, "Clearing DecorView padding top=" + decorView.getPaddingTop());
-                decorView.setPadding(decorView.getPaddingLeft(), 0,
-                    decorView.getPaddingRight(), decorView.getPaddingBottom());
-            }
+            clearPadding(decorView);
 
-            log(Log.INFO, TAG, "fullScreen done");
+            // 强制请求重新布局
+            decorView.requestLayout();
+
+            log(Log.INFO, TAG, "fullScreen done, DecorView padding="
+                + decorView.getPaddingTop());
         } catch (Exception e) {
             log(Log.ERROR, TAG, "Error: " + e.getMessage());
         }
     }
 
-    private void clearAllPadding(View view) {
+    private void clearPadding(View view) {
         if (view == null) return;
         try {
-            // 清除任何有 top padding 的 View
             int top = view.getPaddingTop();
             if (top > 0) {
                 String name = view.getClass().getSimpleName();
-                int viewId = view.getId();
-                log(Log.INFO, TAG, "Clearing padding top=" + top
-                    + " view=" + name + " id=" + viewId);
+                log(Log.INFO, TAG, "Clearing padding top=" + top + " on " + name);
                 view.setPadding(view.getPaddingLeft(), 0,
                     view.getPaddingRight(), view.getPaddingBottom());
             }
         } catch (Exception e) {
             // 忽略
         }
+    }
+
+    private void clearAllPadding(View view) {
+        if (view == null) return;
+        clearPadding(view);
         if (view instanceof ViewGroup) {
             ViewGroup vg = (ViewGroup) view;
             for (int i = 0; i < vg.getChildCount(); i++) {

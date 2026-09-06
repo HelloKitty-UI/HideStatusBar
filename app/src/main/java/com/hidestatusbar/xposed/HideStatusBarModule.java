@@ -5,18 +5,16 @@ import android.graphics.Color;
 import android.os.Build;
 import android.util.Log;
 import android.view.View;
-import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
-import android.widget.FrameLayout;
 import io.github.libxposed.api.XposedModule;
 
 public class HideStatusBarModule extends XposedModule {
 
     private static final String TAG = "HideStatusBar";
-    private int statusBarHeight = 0;
+    private static volatile boolean inSetPadding = false;
 
     public HideStatusBarModule() {
         super();
@@ -34,10 +32,75 @@ public class HideStatusBarModule extends XposedModule {
         log(Log.INFO, TAG, "Hooking Opera Beta, pid=" + android.os.Process.myPid());
         ClassLoader cl = param.getDefaultClassLoader();
 
-        statusBarHeight = 141;
-        log(Log.INFO, TAG, "statusBarHeight=" + statusBarHeight);
-
         try {
+            // 直接 Hook StatusBarDrawingFrameLayout - 拦截所有 padding 设置
+            try {
+                Class<?> statusBarLayout = Class.forName(
+                    "com.opera.browser.urlinput.AddressBarCoordinator$StatusBarDrawingFrameLayout",
+                    false, cl);
+                hook(statusBarLayout.getMethod("setPadding", int.class, int.class, int.class, int.class))
+                    .intercept(chain -> {
+                        log(Log.INFO, TAG, "BLOCKED StatusBarDrawingFrameLayout.setPadding");
+                        // 不执行原方法，直接设 top=0
+                        ((View) chain.getThisObject()).setPadding(
+                            (int) chain.getArg(0), 0,
+                            (int) chain.getArg(2), (int) chain.getArg(3));
+                        return null;
+                    });
+                log(Log.INFO, TAG, "Hooked StatusBarDrawingFrameLayout.setPadding");
+            } catch (Exception e) {
+                log(Log.WARN, TAG, "StatusBarDrawingFrameLayout hook failed: " + e.getMessage());
+                // 尝试其他类名
+                try {
+                    Class<?> statusBarLayout = Class.forName("x0o$a", false, cl);
+                    hook(statusBarLayout.getMethod("setPadding", int.class, int.class, int.class, int.class))
+                        .intercept(chain -> {
+                            log(Log.INFO, TAG, "BLOCKED x0a.setPadding");
+                            ((View) chain.getThisObject()).setPadding(
+                                (int) chain.getArg(0), 0,
+                                (int) chain.getArg(2), (int) chain.getArg(3));
+                            return null;
+                        });
+                } catch (Exception e2) {
+                    log(Log.WARN, TAG, "x0o$a hook also failed: " + e2.getMessage());
+                }
+            }
+
+            // Hook SuggestionsContainer.setPadding
+            try {
+                Class<?> suggestionsClass = Class.forName(
+                    "com.opera.browser.urlinput.SuggestionsContainer",
+                    false, cl);
+                hook(suggestionsClass.getMethod("setPadding", int.class, int.class, int.class, int.class))
+                    .intercept(chain -> {
+                        log(Log.INFO, TAG, "BLOCKED SuggestionsContainer.setPadding");
+                        ((View) chain.getThisObject()).setPadding(
+                            (int) chain.getArg(0), 0,
+                            (int) chain.getArg(2), (int) chain.getArg(3));
+                        return null;
+                    });
+                log(Log.INFO, TAG, "Hooked SuggestionsContainer.setPadding");
+            } catch (Exception e) {
+                log(Log.WARN, TAG, "SuggestionsContainer hook failed: " + e.getMessage());
+            }
+
+            // Hook View.setPadding 作为兜底 - 只拦截设置等于状态栏高度的 top padding
+            hook(View.class.getMethod("setPadding", int.class, int.class, int.class, int.class))
+                .intercept(chain -> {
+                    if (inSetPadding) return chain.proceed();
+                    int top = (int) chain.getArg(1);
+                    // 拦截任何被设置为 141px 的 top padding
+                    if (top >= 140 && top <= 142) {
+                        inSetPadding = true;
+                        ((View) chain.getThisObject()).setPadding(
+                            (int) chain.getArg(0), 0,
+                            (int) chain.getArg(2), (int) chain.getArg(3));
+                        inSetPadding = false;
+                        return null;
+                    }
+                    return chain.proceed();
+                });
+
             Class<?> browserActivity = Class.forName(
                 "com.opera.android.BrowserActivity", false, cl);
 
@@ -46,7 +109,7 @@ public class HideStatusBarModule extends XposedModule {
                 .intercept(chain -> {
                     Object result = chain.proceed();
                     if (chain.getThisObject() instanceof Activity) {
-                        fullScreen((Activity) chain.getThisObject());
+                        applyFullScreen((Activity) chain.getThisObject());
                     }
                     return result;
                 });
@@ -56,10 +119,10 @@ public class HideStatusBarModule extends XposedModule {
                 Object result = chain.proceed();
                 if (chain.getThisObject() instanceof Activity) {
                     Activity a = (Activity) chain.getThisObject();
-                    fullScreen(a);
+                    applyFullScreen(a);
                     View decor = a.getWindow().getDecorView();
-                    decor.postDelayed(() -> fullScreen(a), 200);
-                    decor.postDelayed(() -> fullScreen(a), 600);
+                    decor.postDelayed(() -> applyFullScreen(a), 200);
+                    decor.postDelayed(() -> applyFullScreen(a), 600);
                 }
                 return result;
             });
@@ -70,31 +133,9 @@ public class HideStatusBarModule extends XposedModule {
                     Object result = chain.proceed();
                     if ((boolean) chain.getArg(0)
                             && chain.getThisObject() instanceof Activity) {
-                        fullScreen((Activity) chain.getThisObject());
+                        applyFullScreen((Activity) chain.getThisObject());
                     }
                     return result;
-                });
-
-            // Hook View.setPadding - 阻止设置状态栏相关的 padding
-            hook(View.class.getMethod("setPadding", int.class, int.class, int.class, int.class))
-                .intercept(chain -> {
-                    int top = (int) chain.getArg(1);
-                    // 如果某个 View 被设置了等于状态栏高度的 top padding，强制改为 0
-                    if (top == statusBarHeight || top == statusBarHeight + 1
-                            || top == statusBarHeight - 1) {
-                        String name = "unknown";
-                        if (chain.getThisObject() instanceof View) {
-                            name = ((View) chain.getThisObject()).getClass().getSimpleName();
-                        }
-                        log(Log.INFO, TAG, "BLOCKED setPadding top=" + top + " on " + name);
-                        chain.proceed(); // 先执行原方法
-                        // 然后把 top padding 改为 0
-                        ((View) chain.getThisObject()).setPadding(
-                            (int) chain.getArg(0), 0,
-                            (int) chain.getArg(2), (int) chain.getArg(3));
-                        return null;
-                    }
-                    return chain.proceed();
                 });
 
             log(Log.INFO, TAG, "All hooks installed");
@@ -103,7 +144,7 @@ public class HideStatusBarModule extends XposedModule {
         }
     }
 
-    private void fullScreen(Activity activity) {
+    private void applyFullScreen(Activity activity) {
         if (activity == null || activity.isFinishing()) return;
         Window window = activity.getWindow();
         if (window == null) return;
@@ -132,30 +173,9 @@ public class HideStatusBarModule extends XposedModule {
                     | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
             }
 
-            // 强制清除所有 padding
-            clearAllPadding(window.getDecorView());
-
             log(Log.INFO, TAG, "fullScreen done");
         } catch (Exception e) {
             log(Log.ERROR, TAG, "Error: " + e.getMessage());
-        }
-    }
-
-    private void clearAllPadding(View view) {
-        // 清除 padding 为 0（如果之前被设置为状态栏高度）
-        int top = view.getPaddingTop();
-        if (top > 0 && statusBarHeight > 0
-                && Math.abs(top - statusBarHeight) <= 2) {
-            log(Log.INFO, TAG, "Clearing padding top=" + top
-                + " on " + view.getClass().getSimpleName());
-            view.setPadding(view.getPaddingLeft(), 0,
-                view.getPaddingRight(), view.getPaddingBottom());
-        }
-        if (view instanceof ViewGroup) {
-            ViewGroup vg = (ViewGroup) view;
-            for (int i = 0; i < vg.getChildCount(); i++) {
-                clearAllPadding(vg.getChildAt(i));
-            }
         }
     }
 }

@@ -1,12 +1,14 @@
 package com.hidestatusbar.xposed;
 
 import android.app.Activity;
+import android.graphics.Color;
 import android.os.Build;
 import android.util.Log;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import android.view.WindowManager;
 import io.github.libxposed.api.XposedModule;
 
 public class HideStatusBarModule extends XposedModule {
@@ -19,91 +21,122 @@ public class HideStatusBarModule extends XposedModule {
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
-        log(Log.INFO, TAG, "Module loaded successfully");
+        log(Log.INFO, TAG, "Module loaded");
     }
 
     @Override
     public void onPackageLoaded(PackageLoadedParam param) {
-        String packageName = param.getPackageName();
-        if (!"com.opera.browser.beta".equals(packageName)) {
+        if (!"com.opera.browser.beta".equals(param.getPackageName())) {
             return;
         }
 
-        log(Log.INFO, TAG, "Detected Opera Beta, hooking BrowserActivity");
+        log(Log.INFO, TAG, "Hooking Opera Beta");
 
-        ClassLoader classLoader = param.getDefaultClassLoader();
+        ClassLoader cl = param.getDefaultClassLoader();
 
         try {
-            Class<?> activityClass = Class.forName(
-                "com.opera.android.BrowserActivity", false, classLoader);
+            Class<?> browserActivity = Class.forName(
+                "com.opera.android.BrowserActivity", false, cl);
 
-            java.lang.reflect.Method onResume = activityClass.getMethod("onResume");
-            hook(onResume).intercept(chain -> {
-                Object obj = chain.getThisObject();
-                if (obj instanceof Activity) {
-                    hideStatusBar((Activity) obj);
-                }
+            // Hook onCreate - 最早设置窗口属性
+            hook(browserActivity.getMethod("onCreate", android.os.Bundle.class))
+                .intercept(chain -> {
+                    Object result = chain.proceed();
+                    if (chain.getThisObject() instanceof Activity) {
+                        applyFullScreen((Activity) chain.getThisObject());
+                    }
+                    return result;
+                });
+
+            // Hook onResume
+            hook(browserActivity.getMethod("onResume")).intercept(chain -> {
                 Object result = chain.proceed();
-                if (obj instanceof Activity) {
-                    Activity activity = (Activity) obj;
-                    hideStatusBar(activity);
-                    activity.getWindow().getDecorView().postDelayed(
-                        () -> hideStatusBar(activity), 300);
+                if (chain.getThisObject() instanceof Activity) {
+                    Activity a = (Activity) chain.getThisObject();
+                    applyFullScreen(a);
+                    // 多次延迟确保生效
+                    View decor = a.getWindow().getDecorView();
+                    decor.postDelayed(() -> applyFullScreen(a), 100);
+                    decor.postDelayed(() -> applyFullScreen(a), 500);
+                    decor.postDelayed(() -> applyFullScreen(a), 1000);
                 }
                 return result;
             });
 
-            java.lang.reflect.Method onFocusChanged = activityClass.getMethod(
-                "onWindowFocusChanged", boolean.class);
-            hook(onFocusChanged).intercept(chain -> {
-                boolean hasFocus = (boolean) chain.getArg(0);
-                Object result = chain.proceed();
-                if (hasFocus && chain.getThisObject() instanceof Activity) {
-                    hideStatusBar((Activity) chain.getThisObject());
-                }
-                return result;
-            });
+            // Hook onWindowFocusChanged
+            hook(browserActivity.getMethod("onWindowFocusChanged", boolean.class))
+                .intercept(chain -> {
+                    Object result = chain.proceed();
+                    if ((boolean) chain.getArg(0)
+                            && chain.getThisObject() instanceof Activity) {
+                        applyFullScreen((Activity) chain.getThisObject());
+                    }
+                    return result;
+                });
 
-            log(Log.INFO, TAG, "All hooks installed successfully");
+            // Hook x0o.e() - 阻止 Opera 恢复状态栏
+            try {
+                Class<?> x0oClass = Class.forName("x0o", false, cl);
+                for (java.lang.reflect.Method m : x0oClass.getDeclaredMethods()) {
+                    if (m.getName().equals("e") && m.getParameterCount() == 0) {
+                        hook(m).intercept(chain -> {
+                            // 不执行 Opera 的状态栏设置
+                            log(Log.INFO, TAG, "Blocked x0o.e()");
+                            return null;
+                        });
+                        log(Log.INFO, TAG, "Hooked x0o.e()");
+                    }
+                }
+            } catch (Exception e) {
+                log(Log.WARN, TAG, "Could not hook x0o: " + e.getMessage());
+            }
+
+            log(Log.INFO, TAG, "All hooks installed");
         } catch (Exception e) {
-            log(Log.ERROR, TAG, "Failed to install hooks: " + e.getMessage());
+            log(Log.ERROR, TAG, "Hook failed: " + e.getMessage());
         }
     }
 
-    private void hideStatusBar(Activity activity) {
-        if (activity == null || activity.isFinishing()) {
-            return;
-        }
+    private void applyFullScreen(Activity activity) {
+        if (activity == null || activity.isFinishing()) return;
         Window window = activity.getWindow();
-        if (window == null) {
-            return;
-        }
+        if (window == null) return;
+
         try {
+            // 设置透明状态栏
+            window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+            window.setStatusBarColor(Color.TRANSPARENT);
+            window.setNavigationBarColor(Color.TRANSPARENT);
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                // 让内容延伸到系统栏后面
+                // Android 11+ : 让 DecorView 不为系统栏留空间
                 window.setDecorFitsSystemWindows(false);
                 WindowInsetsController ctrl = window.getInsetsController();
                 if (ctrl != null) {
-                    ctrl.hide(WindowInsets.Type.statusBars());
+                    ctrl.hide(WindowInsets.Type.statusBars()
+                            | WindowInsets.Type.navigationBars());
                     ctrl.setSystemBarsBehavior(
                         WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
                 }
             } else {
+                // Android 10 及以下
                 View decorView = window.getDecorView();
-                int flags = decorView.getSystemUiVisibility();
-                // 先设置布局标志，让内容延伸到状态栏后面
-                flags |= View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
-                decorView.setSystemUiVisibility(flags);
-                // 再设置隐藏标志
-                flags |= View.SYSTEM_UI_FLAG_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
-                decorView.setSystemUiVisibility(flags);
+                decorView.setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+            }
+
+            // 确保根布局不为状态栏留空间
+            View rootView = window.getDecorView().findViewById(android.R.id.content);
+            if (rootView != null) {
+                rootView.setFitsSystemWindows(false);
             }
         } catch (Exception e) {
-            log(Log.ERROR, TAG, "Error hiding status bar: " + e.getMessage());
+            log(Log.ERROR, TAG, "Error: " + e.getMessage());
         }
     }
 }

@@ -32,23 +32,39 @@ public class HideStatusBarModule extends XposedModule {
         ClassLoader cl = param.getDefaultClassLoader();
 
         try {
-            // Hook StatusBarDrawingFrameLayout.onApplyWindowInsets
-            // 完全跳过，防止 setPadding(0, statusBarHeight, 0, bottom)
-            // 不调用 super，直接返回 insets
-            try {
-                Class<?> statusBarLayout = Class.forName(
-                    "com.opera.android.StatusBarDrawingFrameLayout", false, cl);
+            Class<?> statusBarLayout = Class.forName(
+                "com.opera.android.StatusBarDrawingFrameLayout", false, cl);
 
-                hook(statusBarLayout.getMethod("onApplyWindowInsets", WindowInsets.class))
-                    .intercept(chain -> {
-                        // 完全跳过 Opera 的 setPadding 逻辑
-                        // 直接返回原始 insets
-                        return chain.getArg(0);
-                    });
-                log(Log.INFO, TAG, "Hooked StatusBarDrawingFrameLayout.onApplyWindowInsets");
-            } catch (Exception e) {
-                log(Log.WARN, TAG, "StatusBarDrawingFrameLayout hook failed: " + e.getMessage());
-            }
+            // Hook 构造函数 - 在 Opera 读取 XML 属性后，强制将背景色设为透明
+            // 字段 k = status bar 背景色, 字段 l = 另一个颜色
+            hook(statusBarLayout.getDeclaredConstructors()[1])  // 3参构造
+                .intercept(chain -> {
+                    chain.proceed(); // 先执行原构造函数
+                    Object obj = chain.getThisObject();
+                    try {
+                        // 强制将背景色设为透明
+                        java.lang.reflect.Field fieldK = statusBarLayout.getDeclaredField("k");
+                        fieldK.setAccessible(true);
+                        fieldK.setInt(obj, Color.TRANSPARENT);
+
+                        java.lang.reflect.Field fieldL = statusBarLayout.getDeclaredField("l");
+                        fieldL.setAccessible(true);
+                        fieldL.setInt(obj, Color.TRANSPARENT);
+
+                        log(Log.INFO, TAG, "Forced StatusBarDrawingFrameLayout colors to TRANSPARENT");
+                    } catch (Exception e) {
+                        log(Log.WARN, TAG, "Failed to set colors: " + e.getMessage());
+                    }
+                    return null;
+                });
+
+            // Hook onApplyWindowInsets - 阻止 setPadding
+            hook(statusBarLayout.getMethod("onApplyWindowInsets", WindowInsets.class))
+                .intercept(chain -> {
+                    return chain.getArg(0);
+                });
+
+            log(Log.INFO, TAG, "All StatusBarDrawingFrameLayout hooks installed");
 
             Class<?> browserActivity = Class.forName(
                 "com.opera.android.BrowserActivity", false, cl);

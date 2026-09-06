@@ -159,8 +159,7 @@ public class HideStatusBarModule extends XposedModule {
                     ? insets.getInsets(WindowInsets.Type.statusBars()).top : -1;
 
                 log(Log.INFO, TAG, "applyFullScreen: statusBarHeight=" + statusBarHeight
-                    + " actualInsetsTop=" + statusHeight
-                    + " decorFitsSystemWindows=" + window.getDecorFitsSystemWindows());
+                    + " actualInsetsTop=" + statusHeight);
 
                 // Android 11+ 核心设置
                 window.setDecorFitsSystemWindows(false);

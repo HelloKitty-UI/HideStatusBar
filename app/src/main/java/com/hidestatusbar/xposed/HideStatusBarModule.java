@@ -7,7 +7,6 @@ import android.util.Log;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
-import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import io.github.libxposed.api.XposedModule;
 
@@ -35,34 +34,67 @@ public class HideStatusBarModule extends XposedModule {
             Class<?> statusBarLayout = Class.forName(
                 "com.opera.android.StatusBarDrawingFrameLayout", false, cl);
 
-            // Hook 构造函数 - 在 Opera 读取 XML 属性后，强制将背景色设为透明
-            // 字段 k = status bar 背景色, 字段 l = 另一个颜色
-            hook(statusBarLayout.getDeclaredConstructors()[1])  // 3参构造
-                .intercept(chain -> {
-                    chain.proceed(); // 先执行原构造函数
-                    Object obj = chain.getThisObject();
-                    try {
-                        // 强制将背景色设为透明
-                        java.lang.reflect.Field fieldK = statusBarLayout.getDeclaredField("k");
-                        fieldK.setAccessible(true);
-                        fieldK.setInt(obj, Color.TRANSPARENT);
+            // Hook constructors - force all color/draw fields after Opera initializes them
+            for (java.lang.reflect.Constructor<?> ctor : statusBarLayout.getDeclaredConstructors()) {
+                Class<?>[] params = ctor.getParameterTypes();
+                if (params.length == 3
+                        && params[0].getName().equals("android.content.Context")) {
+                    hook(ctor).intercept(chain -> {
+                        chain.proceed();
+                        forceTransparent(statusBarLayout, chain.getThisObject());
+                        return null;
+                    });
+                    log(Log.INFO, TAG, "Hooked constructor (" + params.length + " args)");
+                    break;
+                }
+            }
 
-                        java.lang.reflect.Field fieldL = statusBarLayout.getDeclaredField("l");
-                        fieldL.setAccessible(true);
-                        fieldL.setInt(obj, Color.TRANSPARENT);
-
-                        log(Log.INFO, TAG, "Forced StatusBarDrawingFrameLayout colors to TRANSPARENT");
-                    } catch (Exception e) {
-                        log(Log.WARN, TAG, "Failed to set colors: " + e.getMessage());
-                    }
-                    return null;
-                });
-
-            // Hook onApplyWindowInsets - 阻止 setPadding
+            // Hook onApplyWindowInsets - prevent setPadding
             hook(statusBarLayout.getMethod("onApplyWindowInsets", WindowInsets.class))
                 .intercept(chain -> {
                     return chain.getArg(0);
                 });
+            log(Log.INFO, TAG, "Hooked onApplyWindowInsets");
+
+            // Hook e(I) - runtime setter for status bar color k
+            // Block ALL calls to prevent Opera from setting k back to non-transparent
+            try {
+                java.lang.reflect.Method eMethod = statusBarLayout.getDeclaredMethod("e", int.class);
+                hook(eMethod).intercept(chain -> {
+                    log(Log.INFO, TAG, "Blocked e() call, was=" + chain.getArg(0));
+                    return null;
+                });
+                log(Log.INFO, TAG, "Hooked e(I)");
+            } catch (Exception e) {
+                log(Log.WARN, TAG, "e(I) hook failed: " + e.getMessage());
+            }
+
+            // Hook onDraw - skip drawRect but let super run
+            // This is the backup: even if fields get reset, onDraw won't draw the rectangle
+            hook(statusBarLayout.getMethod("onDraw", android.graphics.Canvas.class))
+                .intercept(chain -> {
+                    // Call super.onDraw() only (View's version, does nothing harmful)
+                    try {
+                        java.lang.reflect.Method superOnDraw =
+                            View.class.getDeclaredMethod("onDraw", android.graphics.Canvas.class);
+                        superOnDraw.invoke(chain.getThisObject(), chain.getArg(0));
+                    } catch (Exception ignored) {}
+                    return null;
+                });
+            log(Log.INFO, TAG, "Hooked onDraw");
+
+            // Hook draw - skip the overlay rect at bottom
+            hook(statusBarLayout.getMethod("draw", android.graphics.Canvas.class))
+                .intercept(chain -> {
+                    // Call super.draw() only (View's version)
+                    try {
+                        java.lang.reflect.Method superDraw =
+                            View.class.getDeclaredMethod("draw", android.graphics.Canvas.class);
+                        superDraw.invoke(chain.getThisObject(), chain.getArg(0));
+                    } catch (Exception ignored) {}
+                    return null;
+                });
+            log(Log.INFO, TAG, "Hooked draw");
 
             log(Log.INFO, TAG, "All StatusBarDrawingFrameLayout hooks installed");
 
@@ -103,6 +135,37 @@ public class HideStatusBarModule extends XposedModule {
             log(Log.INFO, TAG, "All hooks installed");
         } catch (Exception e) {
             log(Log.ERROR, TAG, "Hook failed: " + e.getMessage());
+        }
+    }
+
+    private void forceTransparent(Class<?> clazz, Object obj) {
+        try {
+            // f = false (don't draw status bar background)
+            java.lang.reflect.Field fField = clazz.getDeclaredField("f");
+            fField.setAccessible(true);
+            fField.setBoolean(obj, false);
+            log(Log.INFO, TAG, "Set f=false (no status bar draw)");
+
+            // k = TRANSPARENT
+            java.lang.reflect.Field kField = clazz.getDeclaredField("k");
+            kField.setAccessible(true);
+            kField.setInt(obj, Color.TRANSPARENT);
+            log(Log.INFO, TAG, "Set k=TRANSPARENT");
+
+            // l = TRANSPARENT
+            java.lang.reflect.Field lField = clazz.getDeclaredField("l");
+            lField.setAccessible(true);
+            lField.setInt(obj, Color.TRANSPARENT);
+            log(Log.INFO, TAG, "Set l=TRANSPARENT");
+
+            // i = 0 (status bar height = 0)
+            java.lang.reflect.Field iField = clazz.getDeclaredField("i");
+            iField.setAccessible(true);
+            iField.setInt(obj, 0);
+            log(Log.INFO, TAG, "Set i=0 (status bar height)");
+
+        } catch (Exception e) {
+            log(Log.WARN, TAG, "forceTransparent failed: " + e.getMessage());
         }
     }
 

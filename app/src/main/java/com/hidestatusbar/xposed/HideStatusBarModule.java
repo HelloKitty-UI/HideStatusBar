@@ -3,6 +3,7 @@ package com.hidestatusbar.xposed;
 import android.app.Activity;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
 import android.os.Build;
 import android.util.Log;
 import android.view.View;
@@ -33,31 +34,85 @@ public class HideStatusBarModule extends XposedModule {
         ClassLoader cl = param.getDefaultClassLoader();
 
         try {
-            Class<?> statusBarLayout = Class.forName(
-                "com.opera.android.StatusBarDrawingFrameLayout", false, cl);
+            // === 核心：让 StatusBarDrawingFrameLayout 完全透明 ===
 
-            // Hook onApplyWindowInsets - 完全跳过，不调用 super（防止无限循环）
-            hook(statusBarLayout.getMethod("onApplyWindowInsets", WindowInsets.class))
-                .intercept(chain -> {
-                    return chain.getArg(0); // 返回原始 insets，跳过所有自定义逻辑
-                });
-            log(Log.INFO, TAG, "Hooked onApplyWindowInsets");
+            // 1. Hook onApplyWindowInsets - 跳过 Opera 的 setPadding 逻辑
+            //    但调用 super 确保 insets 正确传播
+            try {
+                Class<?> statusBarLayout = Class.forName(
+                    "com.opera.android.StatusBarDrawingFrameLayout", false, cl);
 
-            // Hook draw() - 让状态栏背景绘制变成空操作
-            hook(statusBarLayout.getMethod("draw", Canvas.class))
-                .intercept(chain -> {
-                    // 不执行原方法，跳过状态栏背景绘制
-                    return null;
-                });
-            log(Log.INFO, TAG, "Hooked draw()");
+                hook(statusBarLayout.getMethod("onApplyWindowInsets", WindowInsets.class))
+                    .intercept(chain -> {
+                        // 调用 View.onApplyWindowInsets（跳过 FrameLayout 的实现）
+                        // 这样 insets 能正确传播，但不会设置 padding
+                        try {
+                            java.lang.reflect.Method superMethod = View.class.getMethod(
+                                "onApplyWindowInsets", WindowInsets.class);
+                            return superMethod.invoke(chain.getThisObject(), chain.getArg(0));
+                        } catch (Exception e) {
+                            return chain.getArg(0);
+                        }
+                    });
+                log(Log.INFO, TAG, "Hooked onApplyWindowInsets");
+            } catch (Exception e) {
+                log(Log.WARN, TAG, "onApplyWindowInsets hook failed: " + e.getMessage());
+            }
 
-            // Hook onDraw() - 让状态栏矩形绘制变成空操作
-            hook(statusBarLayout.getMethod("onDraw", Canvas.class))
-                .intercept(chain -> {
-                    // 不执行原方法，跳过 drawRect
-                    return null;
-                });
-            log(Log.INFO, TAG, "Hooked onDraw()");
+            // 2. Hook draw() - 让状态栏背景绘制完全透明
+            //    不阻止绘制本身（避免 flicker），而是让 Paint 颜色透明
+            try {
+                Class<?> statusBarLayout = Class.forName(
+                    "com.opera.android.StatusBarDrawingFrameLayout", false, cl);
+
+                hook(statusBarLayout.getMethod("draw", Canvas.class))
+                    .intercept(chain -> {
+                        // 获取 Paint 字段并设为透明
+                        View view = (View) chain.getThisObject();
+                        try {
+                            java.lang.reflect.Field paintField = statusBarLayout.getDeclaredField("c");
+                            paintField.setAccessible(true);
+                            Paint paint = (Paint) paintField.get(view);
+                            if (paint != null) {
+                                paint.setColor(Color.TRANSPARENT);
+                            }
+                        } catch (Exception e) {
+                            // 忽略
+                        }
+                        // 执行原方法（此时 Paint 是透明的，所以画出来是透明的）
+                        return chain.proceed();
+                    });
+                log(Log.INFO, TAG, "Hooked draw()");
+            } catch (Exception e) {
+                log(Log.WARN, TAG, "draw() hook failed: " + e.getMessage());
+            }
+
+            // 3. Hook onDraw() - 同样让 Paint 透明
+            try {
+                Class<?> statusBarLayout = Class.forName(
+                    "com.opera.android.StatusBarDrawingFrameLayout", false, cl);
+
+                hook(statusBarLayout.getMethod("onDraw", Canvas.class))
+                    .intercept(chain -> {
+                        View view = (View) chain.getThisObject();
+                        try {
+                            java.lang.reflect.Field paintField = statusBarLayout.getDeclaredField("c");
+                            paintField.setAccessible(true);
+                            Paint paint = (Paint) paintField.get(view);
+                            if (paint != null) {
+                                paint.setColor(Color.TRANSPARENT);
+                            }
+                        } catch (Exception e) {
+                            // 忽略
+                        }
+                        return chain.proceed();
+                    });
+                log(Log.INFO, TAG, "Hooked onDraw()");
+            } catch (Exception e) {
+                log(Log.WARN, TAG, "onDraw() hook failed: " + e.getMessage());
+            }
+
+            // === 设置 Activity 全屏 ===
 
             Class<?> browserActivity = Class.forName(
                 "com.opera.android.BrowserActivity", false, cl);
@@ -113,19 +168,15 @@ public class HideStatusBarModule extends XposedModule {
                 window.setDecorFitsSystemWindows(false);
                 WindowInsetsController ctrl = window.getInsetsController();
                 if (ctrl != null) {
-                    ctrl.hide(WindowInsets.Type.statusBars()
-                            | WindowInsets.Type.navigationBars());
-                    ctrl.setSystemBarsBehavior(
-                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                    // 不要永久隐藏状态栏！
+                    // 只设置透明色和 DecorFitsSystemWindows(false)
+                    // 让 Opera 自己的滚动机制控制显示/隐藏
                 }
             } else {
                 window.getDecorView().setSystemUiVisibility(
                     View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                     | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                    | View.SYSTEM_UI_FLAG_FULLSCREEN
-                    | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                    | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
             }
         } catch (Exception e) {
             log(Log.ERROR, TAG, "Error: " + e.getMessage());

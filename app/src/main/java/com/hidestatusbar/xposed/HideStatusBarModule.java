@@ -13,8 +13,12 @@ public class HideStatusBarModule extends XposedModule {
 
     private static final String TAG = "HideStatusBar";
 
+    public HideStatusBarModule() {
+        super();
+    }
+
     @Override
-    public void onModuleLoaded() {
+    public void onModuleLoaded(ModuleLoadedParam param) {
         log(Log.INFO, TAG, "Module loaded successfully");
     }
 
@@ -33,7 +37,6 @@ public class HideStatusBarModule extends XposedModule {
             Class<?> activityClass = Class.forName(
                 "com.opera.android.BrowserActivity", false, classLoader);
 
-            // Hook onResume
             java.lang.reflect.Method onResume = activityClass.getMethod("onResume");
             hook(onResume).intercept(chain -> {
                 Object obj = chain.getThisObject();
@@ -50,7 +53,6 @@ public class HideStatusBarModule extends XposedModule {
                 return result;
             });
 
-            // Hook onWindowFocusChanged
             java.lang.reflect.Method onFocusChanged = activityClass.getMethod(
                 "onWindowFocusChanged", boolean.class);
             hook(onFocusChanged).intercept(chain -> {

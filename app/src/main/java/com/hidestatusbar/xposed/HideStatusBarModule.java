@@ -1,10 +1,12 @@
 package com.hidestatusbar.xposed;
 
 import android.app.Activity;
+import android.graphics.Canvas;
 import android.graphics.Color;
 import android.os.Build;
 import android.util.Log;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
@@ -35,35 +37,80 @@ public class HideStatusBarModule extends XposedModule {
             Class<?> statusBarLayout = Class.forName(
                 "com.opera.android.StatusBarDrawingFrameLayout", false, cl);
 
-            // Hook onApplyWindowInsets - prevent setPadding(0, statusBarHeight, 0, bottom)
+            // Hook onApplyWindowInsets:
+            // Skip Opera's FrameLayout.onApplyWindowInsets (which calls setPadding)
+            // But still call ViewGroup.dispatchApplyWindowInsets so children get insets
             hook(statusBarLayout.getMethod("onApplyWindowInsets", WindowInsets.class))
                 .intercept(chain -> {
-                    return chain.getArg(0);
-                });
-            log(Log.INFO, TAG, "Hooked onApplyWindowInsets");
+                    WindowInsets insets = (WindowInsets) chain.getArg(0);
+                    View view = (View) chain.getThisObject();
 
-            // Hook onDraw - completely skip (no super call to avoid recursion)
-            hook(statusBarLayout.getMethod("onDraw", android.graphics.Canvas.class))
+                    // Remove all padding from this view
+                    view.setPadding(0, 0, 0, 0);
+
+                    // Make this view zero-height
+                    ViewGroup.LayoutParams lp = view.getLayoutParams();
+                    if (lp != null) {
+                        lp.height = 0;
+                        view.setLayoutParams(lp);
+                    }
+
+                    // Still dispatch insets to children so Opera's layout works
+                    if (view instanceof ViewGroup) {
+                        ViewGroup vg = (ViewGroup) view;
+                        for (int i = 0; i < vg.getChildCount(); i++) {
+                            vg.getChildAt(i).dispatchApplyWindowInsets(insets);
+                        }
+                    }
+
+                    return insets;
+                });
+            log(Log.INFO, TAG, "Hooked onApplyWindowInsets (padding removed, insets forwarded)");
+
+            // Hook draw - skip drawing status bar background
+            // Use ThreadLocal to prevent recursion
+            final ThreadLocal<Boolean> inDraw = new ThreadLocal<>();
+            hook(statusBarLayout.getMethod("draw", Canvas.class))
+                .intercept(chain -> {
+                    if (inDraw.get() != null) return null;
+                    inDraw.set(true);
+                    try {
+                        Canvas canvas = (Canvas) chain.getArg(0);
+                        View view = (View) chain.getThisObject();
+                        // Only draw children, not this view's own background
+                        if (view instanceof ViewGroup) {
+                            ViewGroup vg = (ViewGroup) view;
+                            int count = vg.getChildCount();
+                            for (int i = 0; i < count; i++) {
+                                vg.getChildAt(i).draw(canvas);
+                            }
+                        }
+                    } finally {
+                        inDraw.remove();
+                    }
+                    return null;
+                });
+            log(Log.INFO, TAG, "Hooked draw (skip status bar rect, draw children only)");
+
+            // Hook onDraw - completely skip
+            hook(statusBarLayout.getMethod("onDraw", Canvas.class))
                 .intercept(chain -> null);
             log(Log.INFO, TAG, "Hooked onDraw (blocked)");
 
-            // Hook draw - completely skip (no super call to avoid recursion)
-            hook(statusBarLayout.getMethod("draw", android.graphics.Canvas.class))
-                .intercept(chain -> null);
-            log(Log.INFO, TAG, "Hooked draw (blocked)");
-
-            // Hide the StatusBarDrawingFrameLayout view completely
-            // Do this every time the view is laid out
+            // Hook e(I) - runtime color setter, block it
             try {
-                java.lang.reflect.Method addOnLayoutChangeListener =
-                    View.class.getMethod("addOnLayoutChangeListener", View.OnLayoutChangeListener.class);
-                // Can't use lambda directly, use a post approach instead
-            } catch (Exception ignored) {}
+                hook(statusBarLayout.getDeclaredMethod("e", int.class))
+                    .intercept(chain -> null);
+                log(Log.INFO, TAG, "Hooked e(I) (blocked)");
+            } catch (Exception e) {
+                log(Log.WARN, TAG, "e(I) hook skipped: " + e.getMessage());
+            }
+
+            log(Log.INFO, TAG, "All StatusBarDrawingFrameLayout hooks installed");
 
             Class<?> browserActivity = Class.forName(
                 "com.opera.android.BrowserActivity", false, cl);
 
-            // Hook onCreate - set full screen + hide status bar
             hook(browserActivity.getMethod("onCreate", android.os.Bundle.class))
                 .intercept(chain -> {
                     Object result = chain.proceed();
@@ -73,35 +120,21 @@ public class HideStatusBarModule extends XposedModule {
                     return result;
                 });
 
-            // Hook onResume - repeatedly force full screen and hide status bar view
             hook(browserActivity.getMethod("onResume")).intercept(chain -> {
                 Object result = chain.proceed();
                 if (chain.getThisObject() instanceof Activity) {
                     Activity a = (Activity) chain.getThisObject();
                     applyFullScreen(a);
-
-                    // Repeatedly hide the status bar view with delays
-                    // Opera may recreate/show it at various times
-                    View decor = a.getWindow().getDecorView();
-                    for (int delay : new int[]{0, 200, 500, 1000, 2000}) {
-                        decor.postDelayed(() -> {
-                            applyFullScreen(a);
-                            hideStatusBarView(a);
-                        }, delay);
-                    }
                 }
                 return result;
             });
 
-            // Hook onWindowFocusChanged - re-apply when window gets focus
             hook(browserActivity.getMethod("onWindowFocusChanged", boolean.class))
                 .intercept(chain -> {
                     Object result = chain.proceed();
                     if ((boolean) chain.getArg(0)
                             && chain.getThisObject() instanceof Activity) {
-                        Activity a = (Activity) chain.getThisObject();
-                        applyFullScreen(a);
-                        hideStatusBarView(a);
+                        applyFullScreen((Activity) chain.getThisObject());
                     }
                     return result;
                 });
@@ -112,55 +145,18 @@ public class HideStatusBarModule extends XposedModule {
         }
     }
 
-    private void hideStatusBarView(Activity activity) {
-        try {
-            View decor = activity.getWindow().getDecorView();
-            // Find and hide the StatusBarDrawingFrameLayout recursively
-            hideViewRecursive(decor);
-        } catch (Exception e) {
-            log(Log.WARN, TAG, "hideStatusBarView error: " + e.getMessage());
-        }
-    }
-
-    private void hideViewRecursive(View view) {
-        if (view == null) return;
-        String name = view.getClass().getName();
-        if (name.contains("StatusBarDrawingFrameLayout")) {
-            view.setVisibility(View.GONE);
-            view.setPadding(0, 0, 0, 0);
-            log(Log.INFO, TAG, "Hid StatusBarDrawingFrameLayout");
-            return;
-        }
-        if (view instanceof android.view.ViewGroup) {
-            android.view.ViewGroup vg = (android.view.ViewGroup) view;
-            for (int i = 0; i < vg.getChildCount(); i++) {
-                hideViewRecursive(vg.getChildAt(i));
-            }
-        }
-    }
-
     private void applyFullScreen(Activity activity) {
         if (activity == null || activity.isFinishing()) return;
         Window window = activity.getWindow();
         if (window == null) return;
 
         try {
-            // Make status bar transparent
             window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
             window.setStatusBarColor(Color.TRANSPARENT);
             window.setNavigationBarColor(Color.TRANSPARENT);
 
-            // Let content draw behind system bars
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 window.setDecorFitsSystemWindows(false);
-            }
-
-            // Hide status bar via system UI
-            WindowInsetsController ctrl = window.getInsetsController();
-            if (ctrl != null) {
-                ctrl.hide(WindowInsets.Type.statusBars());
-                ctrl.setSystemBarsBehavior(
-                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
             }
         } catch (Exception e) {
             log(Log.ERROR, TAG, "Error: " + e.getMessage());
